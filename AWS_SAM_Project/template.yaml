@@ -1,0 +1,198 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: AWS Serverless Application Project for SNS message delivery and Message ACK function
+
+Globals:
+  Function:
+    Timeout: 10
+
+Resources:
+  SendMsgFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: helloworld.App::handleRequest
+      Runtime: java8
+      MemorySize: 512
+      Environment:
+        Variables:
+          PARAM1: VALUE
+  #      VpcConfig:
+  #        SecurityGroupIds:
+  #          - sg-085912345678492fb
+  #        SubnetIds:
+  #          - subnet-071f712345678e7c8
+
+  SendMsgFunctionInvokePermission:
+    Type: AWS::Lambda::Permission
+    DependsOn:
+      - SendMsgApi
+      - SendMsgFunction
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref SendMsgFunction
+      Principal: apigateway.amazonaws.com
+  SendMsgApi:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: "Send Message API"
+      Description: "API used for Sending BEA App Message"
+      FailOnWarnings: true
+  SendMsgApiResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref SendMsgApi
+      ParentId: !GetAtt
+        - SendMsgApi
+        - RootResourceId
+      PathPart: message
+  SendMsgApiMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      ApiKeyRequired: false
+      AuthorizationType: NONE
+      HttpMethod: POST
+      Integration:
+        Type: AWS
+        IntegrationHttpMethod: POST
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${SendMsgFunction.Arn}/invocations"
+      #RequestValidatorId: String
+      IntegrationResponses:
+        - StatusCode: 200
+      RequestParameters:
+        method.request.querystring.name: false
+      ResourceId: !Ref SendMsgApiResource
+      RestApiId: !Ref SendMsgApi
+      MethodResponses:
+        - StatusCode: 200
+  ApiGatewayCloudWatchLogsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - apigateway.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: ApiGatewayLogsPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:DescribeLogGroups
+                  - logs:DescribeLogStreams
+                  - logs:PutLogEvents
+                  - logs:GetLogEvents
+                  - logs:FilterLogEvents
+                Resource: "*"
+  SendMsgApiAccount:
+    Type: AWS::ApiGateway::Account
+    Properties:
+      CloudWatchRoleArn:
+        'Fn::GetAtt':
+          - ApiGatewayCloudWatchLogsRole
+          - Arn
+  SendMsgApiUatStage:
+    DependsOn:
+      - SendMsgApiAccount
+    Type: 'AWS::ApiGateway::Stage'
+    Properties:
+      DeploymentId:
+        Ref: SendMsgApiDeployment
+      MethodSettings:
+        - DataTraceEnabled: true
+          HttpMethod: '*'
+          LoggingLevel: INFO
+          ResourcePath: /*
+      RestApiId:
+        Ref: SendMsgApi
+      StageName: Uat
+      TracingEnabled: true
+  SendMsgApiDeployment:
+    Type: 'AWS::ApiGateway::Deployment'
+    DependsOn:
+      - SendMsgApiMethod
+    Properties:
+      RestApiId:
+        Ref: SendMsgApi
+      StageName: UatStage
+
+
+  BEAAppTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      DisplayName: BEA_App
+      TopicName: BEA_App_Topic
+
+  MessageTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PROVISIONED
+      KeySchema:
+        - AttributeName: "messageID"
+          KeyType: "HASH"
+      AttributeDefinitions:
+        - AttributeName: "messageID"
+          AttributeType: "S"
+      ProvisionedThroughput:
+        ReadCapacityUnits: 5
+        WriteCapacityUnits: 5
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+      TableName: MessageTable
+
+  ACKTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PROVISIONED
+      KeySchema:
+        - AttributeName: "messageID"
+          KeyType: "HASH"
+      AttributeDefinitions:
+        - AttributeName: "messageID"
+          AttributeType: "S"
+      ProvisionedThroughput:
+        ReadCapacityUnits: 5
+        WriteCapacityUnits: 5
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+      TableName: ACKTable
+
+  DatabaseFunction:
+    Type: AWS::Serverless::Function # More info about Function Resource: https://github.com/awslabs/serverless-application-model/blob/master/versions/2016-10-31.md#awsserverlessfunction
+    Properties:
+      Policies:
+        - AmazonDynamoDBFullAccess
+      Handler: database.Create::handleRequest
+      Runtime: java8
+      MemorySize: 512
+      Environment: # More info about Env Vars: https://github.com/awslabs/serverless-application-model/blob/master/versions/2016-10-31.md#environment-object
+        Variables:
+          PARAM1: VALUE
+      Events:
+        HelloWorld:
+          Type: Api # More info about API Event Source: https://github.com/awslabs/serverless-application-model/blob/master/versions/2016-10-31.md#api
+          Properties:
+            Path: /create
+            Method: post
+
+
+Outputs:
+  DatabasedApi:
+    Description: "API Gateway endpoint URL for Prod stage for Database function"
+    Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/create/"
+  DatabaseFunction:
+    Description: "Database Lambda Function ARN"
+    Value: !GetAtt DatabaseFunction.Arn
+  DatabaseFunctionIamRole:
+    Description: "Implicit IAM Role created for Database function"
+    Value: !GetAtt DatabaseFunctionRole.Arn
+  SendMsgApi:
+    Description: "Send Message API Domain"
+    Value: !Sub "https://${SendMsgApi}.execute-api.${AWS::Region}.amazonaws.com"
